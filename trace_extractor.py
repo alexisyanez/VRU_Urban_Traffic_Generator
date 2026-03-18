@@ -3,12 +3,10 @@ trace_extractor.py
 ~~~~~~~~~~~~~~~~~~
 Reads the per-timestep raw CSV files produced by sumo_runner.py, filters for
 participants that were present throughout an entire analysis batch, and writes
-consolidated trace files compatible with the NR-SPS simulator.
+consolidated trace files for use in any mobility simulator.
 
 Output file format (one CSV per batch):
     time_step, x, y, type_id, speed, angle
-
-Columns match the format expected by the OOP_for_SPS NR-SPS simulator.
 
 This is a refactored, parametric version of the original observed_vehicles_to_csv.py.
 """
@@ -31,7 +29,7 @@ def extract_traces(
     batch_size: int     = 10_000,
     verbose: bool       = True,
 ) -> list:
-    """Filter and consolidate raw per-step CSVs into NR-SPS trace files.
+    """Filter and consolidate raw per-step CSVs into generated_traces files.
 
     The raw step files cover steps (warmup_steps+1) … (warmup_steps+sampling_steps).
     They are processed in batches of *batch_size* steps to keep memory usage low.

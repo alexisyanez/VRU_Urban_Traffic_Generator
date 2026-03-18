@@ -1,8 +1,8 @@
 # VRU Urban Traffic Generator
 
 Generate heterogeneous urban traffic scenarios (pedestrians, cyclists,
-motorcyclists, and cars) for SUMO and export participant traces for the
-NR-SPS (New Radio Sidelink Protocol Simulator).
+motorcyclists, and cars) for SUMO and export participant traces for use
+in any mobility simulator.
 
 The project is based on the ETSI TR 138.913 urban micro-cell scenario
 (0.25 km² network area).
@@ -17,8 +17,8 @@ The project is based on the ETSI TR 138.913 urban micro-cell scenario
 - **Automatic SUMO files** – generates `.rou.xml` + `.sumocfg` on the fly.
 - **Configurable timing** – warm-up and sampling windows are adjustable
   (defaults: 220 s warm-up + 50 s sampling at 1 ms step resolution).
-- **NR-SPS export** – filters persistent participants and writes batch trace
-  CSVs ready for the NR-SPS mobility input.
+- **Trace export** – filters persistent participants and writes batch trace
+  CSVs ready as mobility input for any simulator.
 
 ---
 
@@ -77,7 +77,7 @@ python main.py
 ```
 ==============================================================
   VRU Urban Traffic Generator
-  ETSI TR 138.913 Urban Scenario  ·  SUMO + NR-SPS
+  ETSI TR 138.913 Urban Scenario  ·  SUMO
 ==============================================================
 
 Step 1 – Target Density
@@ -109,7 +109,7 @@ Step 3 – Confirm / Override Distribution
 Step 4 – Simulation Parameters
 Step 5 – Generate SUMO Scenario
 Step 6 – Run SUMO Simulation
-Step 7 – Extract NR-SPS Traces
+Step 7 – Extract Traces
 ```
 
 ---
@@ -122,7 +122,7 @@ VRU_Urban_Traffic_Generator/
 ├── config.py              # All constants and defaults
 ├── scenario_generator.py  # Density math + SUMO XML file generation
 ├── sumo_runner.py         # TraCI wrapper – runs the simulation
-├── trace_extractor.py     # Filters persistent participants → NR-SPS CSV
+├── trace_extractor.py     # Filters persistent participants → generated_traces CSV
 ├── requirements.txt
 ├── .gitignore
 ├── sumo_assets/           # Static SUMO network files (not generated)
@@ -133,7 +133,7 @@ VRU_Urban_Traffic_Generator/
         ├── p266_c95_m19_v120.rou.xml
         ├── p266_c95_m19_v120.sumocfg
         ├── raw_steps/     ← per-step location CSVs (git-ignored)
-        └── traces/        ← NR-SPS trace CSVs (git-ignored)
+        └── generated_traces/  ← trace CSVs (git-ignored)
 ```
 
 ---
@@ -163,7 +163,7 @@ One file per simulation step during the sampling window.  Each row:
 vehicleId, x, y, type_id, speed_m_s, angle_deg
 ```
 
-### NR-SPS trace files (`traces/traces_batch_N.csv`)
+### Trace files (`generated_traces/traces_batch_N.csv`)
 
 One file per 10 s batch (10 000 steps).  Only participants present in
 **every** step of the batch are retained.  Each row:
@@ -182,8 +182,7 @@ handle increasing pedestrian densities:
 - **Original** (`ETSI_TR_138_913_V14_3_0_urban.net.xml`) – standard sidewalks.
 - **V2** – widened sidewalks.
 - **V3** (`V3_ETSI_TR_138_913_V14_3_0_urban.net.xml`) – further widened
-  sidewalks *and* crosswalks; used for all density scenarios V0–V19
-  (800–6240 users/km²).
+  sidewalks *and* crosswalks.
 
 For very high pedestrian counts (> ~1000) always use the V3 network.
 

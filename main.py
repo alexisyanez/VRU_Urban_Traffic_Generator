@@ -13,7 +13,7 @@ Workflow
   4. User configures optional simulation timing parameters.
   5. App generates SUMO scenario files (.rou.xml + .sumocfg).
   6. App asks to run the SUMO simulation.
-  7. App asks to extract NR-SPS trace CSV files.
+  7. App asks to extract trace CSV files.
 
 Usage
 -----
@@ -236,7 +236,7 @@ def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
 def main():
     print(f"\n{'='*62}")
     print(f"  {_BOLD}VRU Urban Traffic Generator{_RESET}")
-    print(f"  ETSI TR 138.913 Urban Scenario  ·  SUMO + NR-SPS")
+    print(f"  ETSI TR 138.913 Urban Scenario  ·  SUMO")
     print(f"{'='*62}")
 
     # ------------------------------------------------------------------
@@ -327,17 +327,17 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # Step 7 – Extract NR-SPS CSV traces
+    # Step 7 – Extract traces
     # ------------------------------------------------------------------
-    _hdr("Step 7 – Extract NR-SPS Traces")
+    _hdr("Step 7 – Extract Traces")
     print(f"\n  Raw step files are in: {raw_steps_dir}")
-    if not _ask_yes_no("  Extract NR-SPS trace CSVs now?"):
+    if not _ask_yes_no("  Extract trace CSVs now?"):
         print("\n  Skipping extraction.  Run trace_extractor.py manually later.")
         return
 
     from trace_extractor import extract_traces
 
-    traces_dir  = scenario_dir / "traces"
+    traces_dir  = scenario_dir / "generated_traces"
     output_files = extract_traces(
         raw_steps_dir  = raw_steps_dir,
         output_dir     = traces_dir,
