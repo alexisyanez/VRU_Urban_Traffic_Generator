@@ -39,10 +39,11 @@ import config
 def run_simulation(
     sumocfg_path: str | os.PathLike,
     output_dir: str | os.PathLike,
-    warmup_steps: int  = config.DEFAULT_WARMUP_STEPS,
+    warmup_steps: int   = config.DEFAULT_WARMUP_STEPS,
     sampling_steps: int = config.DEFAULT_SAMPLING_STEPS,
-    sumo_binary: str   = "sumo",
-    verbose: bool      = True,
+    step_length: float  = config.STEP_LENGTH,
+    use_gui: bool       = False,
+    verbose: bool       = True,
 ) -> Path:
     """Run SUMO via TraCI and record participant positions during the sampling window.
 
@@ -53,7 +54,8 @@ def run_simulation(
                      A sub-folder ``raw_steps/`` is created automatically.
     warmup_steps   : Number of steps to run before data collection starts.
     sampling_steps : Number of steps to record after the warm-up.
-    sumo_binary    : Name or full path of the SUMO executable (default: ``sumo``).
+    step_length    : Simulation step size in seconds (used for progress display).
+    use_gui        : Launch ``sumo-gui`` instead of headless ``sumo``.
     verbose        : Print progress every 10 000 steps when True.
 
     Returns
@@ -65,14 +67,16 @@ def run_simulation(
     raw_steps_dir.mkdir(parents=True, exist_ok=True)
 
     total_steps = warmup_steps + sampling_steps
+    sumo_binary = "sumo-gui" if use_gui else "sumo"
     sumo_cmd = [sumo_binary, "-c", str(sumocfg_path)]
 
     if verbose:
         print(f"\n[SUMO] Starting simulation: {sumocfg_path.name}")
+        print(f"       Binary  : {sumo_binary}")
         print(f"       Warm-up : {warmup_steps:,} steps  "
-              f"({warmup_steps * config.STEP_LENGTH:.1f} s)")
+              f"({warmup_steps * step_length:.1f} s)")
         print(f"       Sampling: {sampling_steps:,} steps  "
-              f"({sampling_steps * config.STEP_LENGTH:.1f} s)")
+              f"({sampling_steps * step_length:.1f} s)")
         print(f"       Output  : {raw_steps_dir}")
 
     traci.start(sumo_cmd)

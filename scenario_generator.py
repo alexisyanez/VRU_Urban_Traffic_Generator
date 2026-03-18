@@ -10,7 +10,7 @@ propose_distribution(density_km2)            -> dict
 validate_distribution(cars, ped, bike, moto) -> list[str]   (warnings)
 generate_scenario(cars, ped, bike, moto, scenario_dir, net_file, poly_file)
     -> (rou_path, cfg_path)
-density_stats(cars, ped, bike, moto)         -> dict
+density_stats(cars, pedestrians, cyclists, motorcyclists) -> dict
 """
 
 import math
@@ -98,10 +98,10 @@ def validate_distribution(cars: int, ped: int, bike: int, moto: int) -> list:
     return warnings
 
 
-def density_stats(cars: int, ped: int, bike: int, moto: int) -> dict:
+def density_stats(cars: int, pedestrians: int, cyclists: int, motorcyclists: int) -> dict:
     """Compute density metrics for a given distribution."""
-    total = cars + ped + bike + moto
-    vru   = ped + bike + moto
+    total = cars + pedestrians + cyclists + motorcyclists
+    vru   = pedestrians + cyclists + motorcyclists
     return {
         "total"         : total,
         "vru"           : vru,
@@ -123,6 +123,7 @@ def generate_scenario(
     scenario_dir: str | os.PathLike,
     net_file: str  = config.NET_FILE,
     poly_file: str = config.POLY_FILE,
+    step_length: float = config.STEP_LENGTH,
 ) -> tuple:
     """Generate SUMO route + config files inside *scenario_dir*.
 
@@ -138,7 +139,7 @@ def generate_scenario(
     cfg_path   = scenario_dir / f"{name}.sumocfg"
 
     _write_rou_xml(rou_path, cars, ped, bike, moto)
-    _write_sumocfg(cfg_path, rou_path, net_file, poly_file)
+    _write_sumocfg(cfg_path, rou_path, net_file, poly_file, step_length)
 
     return rou_path, cfg_path
 
@@ -289,6 +290,7 @@ def _write_sumocfg(
     rou_path: Path,
     net_file: str,
     poly_file: str,
+    step_length: float = config.STEP_LENGTH,
 ):
     """Write a minimal SUMO configuration file."""
     # Use relative or absolute paths depending on whether net_file is absolute.
@@ -312,7 +314,7 @@ def _write_sumocfg(
         f'        <additional-files value="{rel_poly}"/>\n'
         "    </input>\n"
         f'    <processing>\n'
-        f'        <step-length value="{config.STEP_LENGTH}"/>\n'
+        f'        <step-length value="{step_length}"/>\n'
         "    </processing>\n"
         "</configuration>\n"
     )

@@ -28,7 +28,7 @@ def extract_traces(
     sampling_steps: int = config.DEFAULT_SAMPLING_STEPS,
     batch_size: int     = 10_000,
     verbose: bool       = True,
-) -> list:
+) -> tuple:
     """Filter and consolidate raw per-step CSVs into generated_traces files.
 
     The raw step files cover steps (warmup_steps+1) … (warmup_steps+sampling_steps).
@@ -48,14 +48,17 @@ def extract_traces(
 
     Returns
     -------
-    List of Path objects for the generated trace files.
+    Tuple of:
+      - List of Path objects for the generated trace files.
+      - List of int persistent-participant counts, one per generated file.
     """
     raw_steps_dir = Path(raw_steps_dir)
     output_dir    = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    n_batches     = math.ceil(sampling_steps / batch_size)
-    output_paths  = []
+    n_batches        = math.ceil(sampling_steps / batch_size)
+    output_paths     = []
+    persistent_counts = []
 
     if verbose:
         print(f"\n[EXTRACT] Source : {raw_steps_dir}")
@@ -116,8 +119,9 @@ def extract_traces(
         out_path = output_dir / f"traces_batch_{batch_idx}.csv"
         combined.to_csv(out_path, index=False, header=False)
         output_paths.append(out_path)
+        persistent_counts.append(len(staying_ids))
 
     if verbose:
         print(f"[EXTRACT] Done.  {len(output_paths)} trace file(s) written to {output_dir}")
 
-    return output_paths
+    return output_paths, persistent_counts

@@ -19,6 +19,7 @@ env/
 # --- Simulation output (can be large) -------------------------------------
 scenarios/*/raw_steps/
 scenarios/*/traces/
+scenarios/*
 
 # --- OS artefacts ----------------------------------------------------------
 .DS_Store

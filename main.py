@@ -182,18 +182,23 @@ def _ask_sim_params() -> dict:
     """Ask the user for optional simulation timing overrides."""
     print(
         f"\n  Simulation timing defaults:"
+        f"\n    Step size: {config.STEP_LENGTH} s"
         f"\n    Warm-up  : {config.DEFAULT_WARMUP_S} s  ({config.DEFAULT_WARMUP_STEPS:,} steps)"
         f"\n    Sampling : {config.DEFAULT_SAMPLING_S} s  ({config.DEFAULT_SAMPLING_STEPS:,} steps)"
-        f"\n    Step size: {config.STEP_LENGTH} s"
     )
     change = input("\n  Change timing parameters? [y/N]: ").strip().lower()
     if change != "y":
         return {
+            "step_length"   : config.STEP_LENGTH,
             "warmup_steps"  : config.DEFAULT_WARMUP_STEPS,
             "sampling_steps": config.DEFAULT_SAMPLING_STEPS,
         }
 
-    warmup_s  = _ask_positive_float(
+    step_length = _ask_positive_float(
+        f"  Step size (seconds) [{config.STEP_LENGTH}]: ",
+        default=config.STEP_LENGTH,
+    )
+    warmup_s = _ask_positive_float(
         f"  Warm-up duration (seconds) [{config.DEFAULT_WARMUP_S}]: ",
         default=config.DEFAULT_WARMUP_S,
     )
@@ -202,8 +207,9 @@ def _ask_sim_params() -> dict:
         default=config.DEFAULT_SAMPLING_S,
     )
     return {
-        "warmup_steps"  : int(warmup_s  / config.STEP_LENGTH),
-        "sampling_steps": int(sampling_s / config.STEP_LENGTH),
+        "step_length"   : step_length,
+        "warmup_steps"  : int(warmup_s   / step_length),
+        "sampling_steps": int(sampling_s / step_length),
     }
 
 
@@ -295,6 +301,7 @@ def main():
     rou_path, cfg_path = sg.generate_scenario(
         cars, ped, bike, moto,
         scenario_dir=scenario_dir,
+        step_length=sim_params["step_length"],
     )
     _ok(f"Route file  : {rou_path.name}")
     _ok(f"Config file : {cfg_path.name}")
@@ -303,13 +310,15 @@ def main():
     # Step 6 – Run SUMO simulation
     # ------------------------------------------------------------------
     _hdr("Step 6 – Run SUMO Simulation")
-    print(f"\n  This will run SUMO for "
-          f"~{(sim_params['warmup_steps'] + sim_params['sampling_steps']) * config.STEP_LENGTH:.0f} s"
-          " of simulation time.")
+    total_sim_s = (sim_params["warmup_steps"] + sim_params["sampling_steps"]) * sim_params["step_length"]
+    print(f"\n  This will run SUMO for ~{total_sim_s:.0f} s of simulation time.")
+
+    use_gui = _ask_yes_no("  Use SUMO GUI?", default_yes=False)
 
     if not _ask_yes_no("  Run SUMO now?"):
+        binary = "sumo-gui" if use_gui else "sumo"
         print("\n  Skipping simulation.  You can run it later with:")
-        print(f"    sumo -c \"{cfg_path}\"")
+        print(f"    {binary} -c \"{cfg_path}\"")
         return
 
     # Lazy import so that users who only want to generate files don't need TraCI
@@ -324,6 +333,8 @@ def main():
         output_dir    = scenario_dir,
         warmup_steps  = sim_params["warmup_steps"],
         sampling_steps= sim_params["sampling_steps"],
+        step_length   = sim_params["step_length"],
+        use_gui       = use_gui,
     )
 
     # ------------------------------------------------------------------
@@ -338,7 +349,7 @@ def main():
     from trace_extractor import extract_traces
 
     traces_dir  = scenario_dir / "generated_traces"
-    output_files = extract_traces(
+    output_files, persistent_counts = extract_traces(
         raw_steps_dir  = raw_steps_dir,
         output_dir     = traces_dir,
         warmup_steps   = sim_params["warmup_steps"],
@@ -348,6 +359,53 @@ def main():
     print()
     for fp in output_files:
         _ok(str(fp))
+
+    # ------------------------------------------------------------------
+    # Density achievement report
+    # ------------------------------------------------------------------
+    _hdr("Density Achievement Report")
+    expected_total = (distribution["cars"] + distribution["pedestrians"]
+                      + distribution["cyclists"] + distribution["motorcyclists"])
+    expected_density = expected_total / config.SUMO_AREA_KM2
+
+    if persistent_counts:
+        avg_persistent   = sum(persistent_counts) / len(persistent_counts)
+        max_persistent   = max(persistent_counts)
+        avg_density      = avg_persistent / config.SUMO_AREA_KM2
+        ratio            = avg_persistent / expected_total if expected_total > 0 else 0.0
+
+        print(f"\n  Expected participants : {expected_total}  "
+              f"({expected_density:,.0f} users/km²)")
+        print(f"  Avg persistent/batch : {avg_persistent:.1f}  "
+              f"({avg_density:,.0f} users/km²)  "
+              f"[best batch: {max_persistent}]")
+
+        if ratio >= 0.90:
+            _ok(f"Target density reached  ({ratio*100:.1f}% of expected participants "
+                f"are persistent across each batch).")
+        elif ratio >= 0.70:
+            print(f"\033[33m⚠  Partial density reached ({ratio*100:.1f}% of expected "
+                  f"participants persistent).  Consider:\033[0m")
+            print(f"\033[33m   • Increasing warm-up time (current: "
+                  f"{sim_params['warmup_steps'] * sim_params['step_length']:.0f} s) "
+                  f"so more agents reach steady state before sampling.\033[0m")
+            print(f"\033[33m   • Reducing the batch / sampling window so fewer agents "
+                  f"leave mid-batch.\033[0m")
+        else:
+            print(f"\033[31m✖  Target density NOT reached ({ratio*100:.1f}% of expected "
+                  f"participants persistent).  Action required:\033[0m")
+            print(f"\033[31m   • Increase warm-up time (current: "
+                  f"{sim_params['warmup_steps'] * sim_params['step_length']:.0f} s) – "
+                  f"agents need more time to enter and stabilise.\033[0m")
+            print(f"\033[31m   • Reduce sampling window (current: "
+                  f"{sim_params['sampling_steps'] * sim_params['step_length']:.0f} s) "
+                  f"to keep more agents persistent throughout each batch.\033[0m")
+            print(f"\033[31m   • Reduce step size to shorten batch duration "
+                  f"(current: {sim_params['step_length']} s/step).\033[0m")
+    else:
+        print(f"\033[31m✖  No persistent participants found in any batch.  "
+              f"The warm-up ({sim_params['warmup_steps'] * sim_params['step_length']:.0f} s) "
+              f"may be too short – increase it and re-run.\033[0m")
 
     print(f"\n{'='*62}")
     _ok(f"All done!  {len(output_files)} trace file(s) in {traces_dir}")
