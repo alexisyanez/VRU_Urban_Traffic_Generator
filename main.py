@@ -235,6 +235,45 @@ def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
     return raw == "y"
 
 
+def _fmt_time(seconds: float) -> str:
+    """Format a duration in seconds as a compact human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.0f} s"
+    elif seconds < 3600:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}m {s:02d}s"
+    else:
+        h, rem = divmod(int(seconds), 3600)
+        m = rem // 60
+        return f"{h}h {m:02d}m"
+
+
+def _estimate_times(total_participants: int, total_steps: int,
+                    sampling_steps: int, n_workers: int) -> dict:
+    """Return rough wall-clock time estimates (seconds) for each phase.
+
+    Based on empirical SUMO throughput and pandas/file-I/O benchmarks:
+    - SUMO throughput degrades with participant count.
+    - Extraction time scales with step count × per-participant overhead.
+    """
+    # SUMO steps/second empirical model (degrades with participant load)
+    sim_rate      = max(300, 15_000 / (1 + total_participants / 300))
+    sim_s         = total_steps / sim_rate
+
+    # Extraction: reading + pandas per step file
+    time_per_step = 3e-4 + total_participants * 5e-6   # seconds per step file
+    seq_extract_s = sampling_steps * time_per_step
+    par_extract_s = max(1.0, seq_extract_s / n_workers * 1.15)  # +15% coordination
+
+    return {
+        "sim_s"        : sim_s,
+        "seq_extract_s": seq_extract_s,
+        "par_extract_s": par_extract_s,
+        "seq_total_s"  : sim_s + seq_extract_s,
+        "par_total_s"  : sim_s + par_extract_s,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
@@ -310,10 +349,48 @@ def main():
     # Step 6 – Run SUMO simulation
     # ------------------------------------------------------------------
     _hdr("Step 6 – Run SUMO Simulation")
-    total_sim_s = (sim_params["warmup_steps"] + sim_params["sampling_steps"]) * sim_params["step_length"]
+    total_participants = (distribution["cars"] + distribution["pedestrians"]
+                          + distribution["cyclists"] + distribution["motorcyclists"])
+    total_steps_all = sim_params["warmup_steps"] + sim_params["sampling_steps"]
+    total_sim_s     = total_steps_all * sim_params["step_length"]
     print(f"\n  This will run SUMO for ~{total_sim_s:.0f} s of simulation time.")
 
-    use_gui = _ask_yes_no("  Use SUMO GUI?", default_yes=False)
+    # --- Parallel computation decision ---------------------------------------
+    n_cpu        = os.cpu_count() or 1
+    n_workers    = max(1, n_cpu - 1)
+    is_heavy     = (total_participants > 1000)
+    use_parallel = False
+
+    if n_workers >= 2 and is_heavy:
+        eta = _estimate_times(
+            total_participants, total_steps_all,
+            sim_params["sampling_steps"], n_workers,
+        )
+        print(f"\n  {_WARN}⚑  Heavy scenario detected{_RESET}  "
+              f"({total_participants} participants, "
+              f"step = {sim_params['step_length']} s, "
+              f"{n_cpu} CPU cores → {n_workers} workers available)")
+        col = 32
+        print(f"\n  {'Mode':<{col}}  {'Simulation':>11}  {'Extraction':>11}  {'Total':>11}")
+        print(f"  {'─'*col}  {'─'*11}  {'─'*11}  {'─'*11}")
+        print(f"  {'Sequential  (1 worker)':<{col}}  "
+              f"{_fmt_time(eta['sim_s']):>11}  "
+              f"{_fmt_time(eta['seq_extract_s']):>11}  "
+              f"{_fmt_time(eta['seq_total_s']):>11}")
+        print(f"  {f'Parallel    ({n_workers} workers)':<{col}}  "
+              f"{_fmt_time(eta['sim_s']):>11}  "
+              f"{_fmt_time(eta['par_extract_s']):>11}  "
+              f"{_fmt_time(eta['par_total_s']):>11}")
+        use_parallel = _ask_yes_no(
+            f"\n  Use parallel trace extraction ({n_workers} workers)?",
+            default_yes=True,
+        )
+
+    if use_parallel:
+        use_gui = False
+        _ok("GUI automatically disabled for parallel mode (headless SUMO).")
+    else:
+        use_gui = _ask_yes_no("  Use SUMO GUI?", default_yes=False)
 
     if not _ask_yes_no("  Run SUMO now?"):
         binary = "sumo-gui" if use_gui else "sumo"
@@ -346,15 +423,26 @@ def main():
         print("\n  Skipping extraction.  Run trace_extractor.py manually later.")
         return
 
-    from trace_extractor import extract_traces
+    traces_dir = scenario_dir / "generated_traces"
 
-    traces_dir  = scenario_dir / "generated_traces"
-    output_files, persistent_counts = extract_traces(
-        raw_steps_dir  = raw_steps_dir,
-        output_dir     = traces_dir,
-        warmup_steps   = sim_params["warmup_steps"],
-        sampling_steps = sim_params["sampling_steps"],
-    )
+    if use_parallel:
+        from trace_extractor import extract_traces_parallel
+        print(f"\n  Running parallel extraction with {n_workers} workers …")
+        output_files, persistent_counts = extract_traces_parallel(
+            raw_steps_dir  = raw_steps_dir,
+            output_dir     = traces_dir,
+            n_workers      = n_workers,
+            warmup_steps   = sim_params["warmup_steps"],
+            sampling_steps = sim_params["sampling_steps"],
+        )
+    else:
+        from trace_extractor import extract_traces
+        output_files, persistent_counts = extract_traces(
+            raw_steps_dir  = raw_steps_dir,
+            output_dir     = traces_dir,
+            warmup_steps   = sim_params["warmup_steps"],
+            sampling_steps = sim_params["sampling_steps"],
+        )
 
     print()
     for fp in output_files:
@@ -413,4 +501,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Required on Windows so that spawned multiprocessing workers don't
+    # re-execute the top-level script.
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
