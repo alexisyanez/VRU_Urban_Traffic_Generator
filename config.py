@@ -30,19 +30,26 @@ DEFAULT_VRU_SPLIT = {
 
 # ---------------------------------------------------------------------------
 # Simulation timing
-# Warm-up 220 s ensures all personFlows (begin=120 s) have fully entered and
-# reached steady state before recording starts.  50 s sampling = 50 000 steps.
+# All agent flows are injected within FLOW_INJECT_WINDOW_S seconds (t=0 to
+# t=15 s) using per-flow computed periods, so the warm-up only needs to cover
+# the injection window plus a short stabilisation period.
+# Result: warmup 30 s (was 220 s) – an ~86 % reduction in simulation overhead.
 # ---------------------------------------------------------------------------
 STEP_LENGTH            = 0.001    # 1 ms per simulation step (all V0-V19 scenarios)
-DEFAULT_WARMUP_S       = 220      # seconds (configurable by user)
+DEFAULT_WARMUP_S       = 30       # seconds: 15 s inject + 15 s stabilise (was 220 s)
 DEFAULT_SAMPLING_S     = 50       # seconds (configurable by user)
 
-DEFAULT_WARMUP_STEPS   = int(DEFAULT_WARMUP_S   / STEP_LENGTH)   # 220 000
+DEFAULT_WARMUP_STEPS   = int(DEFAULT_WARMUP_S   / STEP_LENGTH)   # 30 000
 DEFAULT_SAMPLING_STEPS = int(DEFAULT_SAMPLING_S / STEP_LENGTH)   # 50 000
 
+# All flow and personFlow elements use begin=0, end=FLOW_INJECT_WINDOW_S.
+# The per-flow period is computed as FLOW_INJECT_WINDOW_S / n_vehicles so
+# every agent enters within this window regardless of quantity.
+FLOW_INJECT_WINDOW_S = 15.0   # seconds
+
 # PersonFlow injection begins at this simulation time (seconds).
-# Should be well below the warmup duration.
-PERSONFLOW_BEGIN_S = 120.0
+# Set to 0 so pedestrians enter alongside vehicles (no artificial delay).
+PERSONFLOW_BEGIN_S = 0.0
 
 # ---------------------------------------------------------------------------
 # SUMO asset paths  (relative to project root)

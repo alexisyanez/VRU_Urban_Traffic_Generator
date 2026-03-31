@@ -21,6 +21,7 @@ Usage
 """
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -248,29 +249,174 @@ def _fmt_time(seconds: float) -> str:
         return f"{h}h {m:02d}m"
 
 
-def _estimate_times(total_participants: int, total_steps: int,
-                    sampling_steps: int, n_workers: int) -> dict:
-    """Return rough wall-clock time estimates (seconds) for each phase.
+# ---------------------------------------------------------------------------
+# Parallel simulation worker  (module-level so multiprocessing can pickle it)
+# ---------------------------------------------------------------------------
 
-    Based on empirical SUMO throughput and pandas/file-I/O benchmarks:
-    - SUMO throughput degrades with participant count.
-    - Extraction time scales with step count × per-participant overhead.
+def _run_sim_extract_worker(args: tuple):
+    """Run one SUMO simulation slice and extract its traces.
+
+    In parallel speed mode each worker simulates the full warm-up plus a slice
+    of the sampling window; seed=None so SUMO picks its own random state.
+    In multiple-run mode a distinct integer seed is supplied so each run
+    produces statistically independent traffic patterns.
+    Extraction happens immediately after simulation inside the same process.
+
+    Args tuple: (worker_id, cfg_path_str, worker_dir_str,
+                 warmup_steps, sampling_steps, step_length, seed)
+
+    Returns: (list[str] of trace file paths, list[int] of persistent counts)
     """
-    # SUMO steps/second empirical model (degrades with participant load)
-    sim_rate      = max(300, 15_000 / (1 + total_participants / 300))
-    sim_s         = total_steps / sim_rate
+    (worker_id, cfg_path_str, worker_dir_str,
+     warmup_steps, sampling_steps, step_length, seed) = args
 
-    # Extraction: reading + pandas per step file
-    time_per_step = 3e-4 + total_participants * 5e-6   # seconds per step file
-    seq_extract_s = sampling_steps * time_per_step
-    par_extract_s = max(1.0, seq_extract_s / n_workers * 1.15)  # +15% coordination
+    from pathlib import Path as _Path
+    from sumo_runner import run_simulation
+    from trace_extractor import extract_traces
+
+    worker_dir = _Path(worker_dir_str)
+
+    raw_steps_dir = run_simulation(
+        sumocfg_path   = cfg_path_str,
+        output_dir     = worker_dir,
+        warmup_steps   = warmup_steps,
+        sampling_steps = sampling_steps,
+        step_length    = step_length,
+        use_gui        = False,
+        verbose        = False,
+        seed           = seed,
+    )
+
+    traces_dir = worker_dir / "generated_traces"
+    output_files, persistent_counts = extract_traces(
+        raw_steps_dir  = raw_steps_dir,
+        output_dir     = traces_dir,
+        warmup_steps   = warmup_steps,
+        sampling_steps = sampling_steps,
+        verbose        = False,
+    )
+
+    return [str(p) for p in output_files], persistent_counts
+
+
+def _ask_positive_int(prompt: str, default: int) -> int:
+    while True:
+        raw = input(prompt).strip()
+        if raw == "":
+            return default
+        try:
+            val = int(raw)
+            if val >= 1:
+                return val
+            _err("Value must be >= 1.")
+        except ValueError:
+            _err("Please enter an integer.")
+
+
+def _ask_runs() -> int:
+    """Ask how many independent runs to produce.
+
+    Each run uses a distinct SUMO random seed so traffic patterns differ,
+    enabling statistical replication over the same simulation period and
+    distribution.
+    """
+    n = _ask_positive_int(
+        "\n  Number of independent runs [1]: ", default=1
+    )
+    if n > 1:
+        _warn(f"{n} runs requested – each will use a unique SUMO random seed.")
+        print(f"  Outputs will be saved in: run_1/  run_2/ … run_{n}/")
+    return n
+
+
+def _get_hw_profile() -> dict:
+    """Return CPU GHz and RAM GB for the current machine via psutil."""
+    try:
+        import psutil
+        freq   = psutil.cpu_freq()
+        cpu_hz = freq.current if (freq and freq.current) else (freq.max if freq else 3000)
+        ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        return {"cpu_ghz": cpu_hz / 1000, "ram_gb": ram_gb}
+    except Exception:
+        return {"cpu_ghz": 3.0, "ram_gb": 8.0}
+
+
+def _estimate_times(
+    total_participants: int,
+    warmup_steps: int,
+    sampling_steps: int,
+    n_workers: int,
+    hw: dict,
+    step_length: float = config.STEP_LENGTH,
+) -> dict:
+    """Hardware-aware, 3-phase wall-clock time estimates.
+
+    Calibration reference (measured on user's machine):
+      ~286 active agents at step=0.001 s  →  ~62 ms/step wall clock
+      (SUMO log: 20 ms simulation + 42 ms TraCI per step)
+      Verified: 8 500 steps × 62 ms ≈ 527 s ≈ "roughly 7 minutes".
+
+    With the injection-window approach all agent types enter between t=0 and
+    t=FLOW_INJECT_WINDOW_S, so the three phases are:
+
+      Phase 1 – injection window (t=0 → FLOW_INJECT_WINDOW_S)
+        All types ramp from 0 to target count simultaneously.
+        avg_agents ≈ total × 0.50.
+
+      Phase 2 – post-injection stabilisation
+        Agents spread and reach naturalistic positions/speeds.
+        avg_agents ≈ total × 0.95.
+
+      Phase 3 – sampling window (steady state + one CSV write per step)
+        All participants active; I/O cost added on top of SUMO cost.
+
+    All cost constants are scaled by cpu_ghz / 3.5 (reference machine).
+    """
+    cpu_scale = hw["cpu_ghz"] / 3.5
+    ram_gb    = hw["ram_gb"]
+
+    # Per-step SUMO + TraCI cost (ms), calibrated at 3.5 GHz:
+    #   base   = 20 ms (SUMO computation) + ~7 ms TraCI framework = 27 ms
+    #   at 286 agents total = 62 ms  →  per_agent = (62−27)/286 ≈ 0.122 ms
+    base_ms      = 27.0 / cpu_scale
+    per_agent_ms = 0.122 / cpu_scale
+
+    inject_steps = int(config.FLOW_INJECT_WINDOW_S / step_length)
+
+    # Phase 1: injection window — all agent types entering simultaneously
+    ph1_steps      = min(inject_steps, warmup_steps)
+    avg_agents_ph1 = total_participants * 0.50
+    ph1_ms         = ph1_steps * (base_ms + per_agent_ms * avg_agents_ph1)
+
+    # Phase 2: stabilisation after injection ends
+    ph2_steps      = max(0, warmup_steps - ph1_steps)
+    avg_agents_ph2 = total_participants * 0.95
+    ph2_ms         = ph2_steps * (base_ms + per_agent_ms * avg_agents_ph2)
+
+    # Phase 3: sampling window — steady state + CSV write per step
+    io_ms  = (0.10 + total_participants * 1.40e-3) / cpu_scale
+    ph3_ms = sampling_steps * (base_ms + per_agent_ms * total_participants + io_ms)
+
+    sim_s = (ph1_ms + ph2_ms + ph3_ms) / 1000
+
+    # Parallel simulation: each worker does full warmup + sampling/n_workers steps.
+    sampling_per_worker = math.ceil(sampling_steps / n_workers)
+    par_ph3_ms = sampling_per_worker * (base_ms + per_agent_ms * total_participants + io_ms)
+    par_sim_s  = (ph1_ms + ph2_ms + par_ph3_ms) / 1000
+
+    # Extraction cost
+    ram_scale              = min(1.0, ram_gb / 8.0)
+    time_per_step          = (2.0e-4 + total_participants * 3.0e-6) / ram_scale
+    seq_extract_s          = sampling_steps * time_per_step
+    par_extract_per_worker = sampling_per_worker * time_per_step
 
     return {
         "sim_s"        : sim_s,
+        "par_sim_s"    : par_sim_s,
         "seq_extract_s": seq_extract_s,
-        "par_extract_s": par_extract_s,
+        "par_extract_s": par_extract_per_worker,
         "seq_total_s"  : sim_s + seq_extract_s,
-        "par_total_s"  : sim_s + par_extract_s,
+        "par_total_s"  : par_sim_s + par_extract_per_worker,
     }
 
 
@@ -320,6 +466,7 @@ def main():
     # ------------------------------------------------------------------
     _hdr("Step 4 – Simulation Parameters")
     sim_params = _ask_sim_params()
+    n_runs = _ask_runs()
 
     # ------------------------------------------------------------------
     # Step 5 – Generate SUMO scenario files
@@ -346,103 +493,188 @@ def main():
     _ok(f"Config file : {cfg_path.name}")
 
     # ------------------------------------------------------------------
-    # Step 6 – Run SUMO simulation
+    # Step 6 – Run SUMO Simulation
     # ------------------------------------------------------------------
     _hdr("Step 6 – Run SUMO Simulation")
     total_participants = (distribution["cars"] + distribution["pedestrians"]
                           + distribution["cyclists"] + distribution["motorcyclists"])
     total_steps_all = sim_params["warmup_steps"] + sim_params["sampling_steps"]
     total_sim_s     = total_steps_all * sim_params["step_length"]
-    print(f"\n  This will run SUMO for ~{total_sim_s:.0f} s of simulation time.")
+    run_label = f"{n_runs} independent run{'s' if n_runs > 1 else ''}"
+    print(f"\n  This will run SUMO for ~{total_sim_s:.0f} s of simulation time "
+          f"({run_label}).")
 
-    # --- Parallel computation decision ---------------------------------------
+    # --- Parallel computation decision -----------------------------------
     n_cpu        = os.cpu_count() or 1
     n_workers    = max(1, n_cpu - 1)
-    is_heavy     = (total_participants > 1000)
+    is_heavy     = (total_participants > 500)
     use_parallel = False
 
     if n_workers >= 2 and is_heavy:
+        hw  = _get_hw_profile()
         eta = _estimate_times(
-            total_participants, total_steps_all,
-            sim_params["sampling_steps"], n_workers,
+            total_participants,
+            sim_params["warmup_steps"],
+            sim_params["sampling_steps"],
+            n_workers,
+            hw,
+            step_length=sim_params["step_length"],
         )
+        runs_note = f"  ×{n_runs} runs" if n_runs > 1 else ""
         print(f"\n  {_WARN}⚑  Heavy scenario detected{_RESET}  "
               f"({total_participants} participants, "
-              f"step = {sim_params['step_length']} s, "
-              f"{n_cpu} CPU cores → {n_workers} workers available)")
+              f"step = {sim_params['step_length']} s{runs_note})")
+        print(f"  Hardware : {hw['cpu_ghz']:.2f} GHz CPU · "
+              f"{hw['ram_gb']:.1f} GB RAM · "
+              f"{n_cpu} cores → {n_workers} workers available")
         col = 32
-        print(f"\n  {'Mode':<{col}}  {'Simulation':>11}  {'Extraction':>11}  {'Total':>11}")
-        print(f"  {'─'*col}  {'─'*11}  {'─'*11}  {'─'*11}")
+        print(f"\n  {'Mode':<{col}}  {'Simulation':>11}  {'Extraction':>11}  {'Total (per run)':>15}")
+        print(f"  {'─'*col}  {'─'*11}  {'─'*11}  {'─'*15}")
         print(f"  {'Sequential  (1 worker)':<{col}}  "
               f"{_fmt_time(eta['sim_s']):>11}  "
               f"{_fmt_time(eta['seq_extract_s']):>11}  "
-              f"{_fmt_time(eta['seq_total_s']):>11}")
+              f"{_fmt_time(eta['seq_total_s']):>15}")
         print(f"  {f'Parallel    ({n_workers} workers)':<{col}}  "
-              f"{_fmt_time(eta['sim_s']):>11}  "
+              f"{_fmt_time(eta['par_sim_s']):>11}  "
               f"{_fmt_time(eta['par_extract_s']):>11}  "
-              f"{_fmt_time(eta['par_total_s']):>11}")
+              f"{_fmt_time(eta['par_total_s']):>15}")
+        print(f"  {_WARN}Note: parallel splits the sampling window across {n_workers} SUMO")
+        print(f"  instances (each does the full warm-up); extraction is embedded in each worker.{_RESET}")
+        if n_runs > 1:
+            print(f"  {_WARN}Multiple runs: the above totals are per run × {n_runs} runs.{_RESET}")
+        print(f"  {_WARN}Cloud-synced paths (OneDrive, Google Drive) may be significantly slower.{_RESET}")
         use_parallel = _ask_yes_no(
-            f"\n  Use parallel trace extraction ({n_workers} workers)?",
+            f"\n  Use parallel simulation ({n_workers} SUMO instances) for speed?",
             default_yes=True,
         )
 
+    # --- Pre-run confirmation --------------------------------------------
+    do_extract = True
+    use_gui    = False
     if use_parallel:
-        use_gui = False
-        _ok("GUI automatically disabled for parallel mode (headless SUMO).")
+        _ok(f"Parallel mode: {n_workers} SUMO instances will split each sampling window.")
+        launch_label = (
+            f"all {n_runs} runs × {n_workers} workers"
+            if n_runs > 1 else f"{n_workers} workers"
+        )
+        if not _ask_yes_no(f"  Launch {launch_label}?", default_yes=True):
+            print("\n  Skipping.  Run manually with:")
+            print(f"    sumo -c \"{cfg_path}\"")
+            return
     else:
         use_gui = _ask_yes_no("  Use SUMO GUI?", default_yes=False)
+        if not _ask_yes_no("  Run SUMO now?"):
+            binary = "sumo-gui" if use_gui else "sumo"
+            print("\n  Skipping simulation.  You can run it later with:")
+            print(f"    {binary} -c \"{cfg_path}\"")
+            return
+        if n_runs == 1:
+            do_extract = _ask_yes_no(
+                "  Extract traces immediately after simulation?",
+                default_yes=True,
+            )
 
-    if not _ask_yes_no("  Run SUMO now?"):
-        binary = "sumo-gui" if use_gui else "sumo"
-        print("\n  Skipping simulation.  You can run it later with:")
-        print(f"    {binary} -c \"{cfg_path}\"")
-        return
-
-    # Lazy import so that users who only want to generate files don't need TraCI
+    # Lazy imports (keeps startup fast for users who only generate files)
     try:
         from sumo_runner import run_simulation
     except EnvironmentError as exc:
         _err(str(exc))
         return
+    from trace_extractor import extract_traces
 
-    raw_steps_dir = run_simulation(
-        sumocfg_path  = cfg_path,
-        output_dir    = scenario_dir,
-        warmup_steps  = sim_params["warmup_steps"],
-        sampling_steps= sim_params["sampling_steps"],
-        step_length   = sim_params["step_length"],
-        use_gui       = use_gui,
-    )
+    # --- Run loop --------------------------------------------------------
+    all_output_files     : list = []
+    all_persistent_counts: list = []
+    traces_dir = None
 
-    # ------------------------------------------------------------------
-    # Step 7 – Extract traces
-    # ------------------------------------------------------------------
-    _hdr("Step 7 – Extract Traces")
-    print(f"\n  Raw step files are in: {raw_steps_dir}")
-    if not _ask_yes_no("  Extract trace CSVs now?"):
-        print("\n  Skipping extraction.  Run trace_extractor.py manually later.")
-        return
-
-    traces_dir = scenario_dir / "generated_traces"
-
-    if use_parallel:
-        from trace_extractor import extract_traces_parallel
-        print(f"\n  Running parallel extraction with {n_workers} workers …")
-        output_files, persistent_counts = extract_traces_parallel(
-            raw_steps_dir  = raw_steps_dir,
-            output_dir     = traces_dir,
-            n_workers      = n_workers,
-            warmup_steps   = sim_params["warmup_steps"],
-            sampling_steps = sim_params["sampling_steps"],
+    for run_idx in range(n_runs):
+        # Seed: only matters for multiple runs (statistical independence).
+        # Parallel speed-mode workers receive this same seed (or None for
+        # a single run) – they are partitioning one period, not replicating.
+        run_seed = run_idx + 1 if n_runs > 1 else None
+        if n_runs > 1:
+            print(f"\n  {'─'*62}")
+            print(f"  Run {run_idx + 1} / {n_runs}  (SUMO seed = {run_seed})")
+            print(f"  {'─'*62}")
+        run_dir = (
+            scenario_dir / f"run_{run_idx + 1}"
+            if n_runs > 1 else scenario_dir
         )
-    else:
-        from trace_extractor import extract_traces
-        output_files, persistent_counts = extract_traces(
-            raw_steps_dir  = raw_steps_dir,
-            output_dir     = traces_dir,
-            warmup_steps   = sim_params["warmup_steps"],
-            sampling_steps = sim_params["sampling_steps"],
-        )
+
+        if use_parallel:
+            sampling_per_worker = math.ceil(sim_params["sampling_steps"] / n_workers)
+            worker_args = [
+                (
+                    i,
+                    str(cfg_path),
+                    str(run_dir / f"worker_{i}"),
+                    sim_params["warmup_steps"],
+                    sampling_per_worker,
+                    sim_params["step_length"],
+                    run_seed,   # None for single run; distinct seed per multiple run
+                )
+                for i in range(n_workers)
+            ]
+            print(f"\n  Launching {n_workers} SUMO instances in parallel …")
+            from multiprocessing import Pool
+            with Pool(n_workers) as pool:
+                results = pool.map(_run_sim_extract_worker, worker_args)
+            print(f"  All {n_workers} workers completed.  Merging traces …")
+
+            import pandas as pd
+            merged_dir = run_dir / "generated_traces"
+            merged_dir.mkdir(parents=True, exist_ok=True)
+            all_dfs = []
+            for worker_files, _ in results:
+                for fpath_str in worker_files:
+                    try:
+                        all_dfs.append(pd.read_csv(fpath_str, header=None))
+                    except Exception:
+                        pass
+            if all_dfs:
+                merged_path = merged_dir / "traces.csv"
+                pd.concat(all_dfs, ignore_index=True).to_csv(
+                    merged_path, index=False, header=False
+                )
+                output_files = [merged_path]
+            else:
+                output_files = []
+            persistent_counts = [c for _, counts in results for c in counts]
+            traces_dir = merged_dir
+
+        else:
+            raw_steps_dir = run_simulation(
+                sumocfg_path   = cfg_path,
+                output_dir     = run_dir,
+                warmup_steps   = sim_params["warmup_steps"],
+                sampling_steps = sim_params["sampling_steps"],
+                step_length    = sim_params["step_length"],
+                use_gui        = use_gui,
+                seed           = run_seed,
+            )
+
+            if n_runs == 1:
+                _hdr("Step 7 – Extract Traces")
+            print(f"\n  Raw step files are in: {raw_steps_dir}")
+            if not do_extract:
+                print("\n  Skipping extraction.  Run trace_extractor.py manually later.")
+                return
+
+            traces_dir = run_dir / "generated_traces"
+            output_files, persistent_counts = extract_traces(
+                raw_steps_dir  = raw_steps_dir,
+                output_dir     = traces_dir,
+                warmup_steps   = sim_params["warmup_steps"],
+                sampling_steps = sim_params["sampling_steps"],
+            )
+
+        all_output_files.extend(output_files)
+        all_persistent_counts.extend(persistent_counts)
+
+    output_files      = all_output_files
+    persistent_counts = all_persistent_counts
+    if traces_dir is None:
+        traces_dir = scenario_dir / "generated_traces"
 
     print()
     for fp in output_files:

@@ -44,6 +44,7 @@ def run_simulation(
     step_length: float  = config.STEP_LENGTH,
     use_gui: bool       = False,
     verbose: bool       = True,
+    seed: int | None    = None,
 ) -> Path:
     """Run SUMO via TraCI and record participant positions during the sampling window.
 
@@ -57,6 +58,8 @@ def run_simulation(
     step_length    : Simulation step size in seconds (used for progress display).
     use_gui        : Launch ``sumo-gui`` instead of headless ``sumo``.
     verbose        : Print progress every 10 000 steps when True.
+    seed           : Random seed passed to SUMO via ``--seed``.  When None the
+                     SUMO default (random) is used.
 
     Returns
     -------
@@ -69,6 +72,8 @@ def run_simulation(
     total_steps = warmup_steps + sampling_steps
     sumo_binary = "sumo-gui" if use_gui else "sumo"
     sumo_cmd = [sumo_binary, "-c", str(sumocfg_path)]
+    if seed is not None:
+        sumo_cmd += ["--seed", str(seed)]
 
     if verbose:
         print(f"\n[SUMO] Starting simulation: {sumocfg_path.name}")

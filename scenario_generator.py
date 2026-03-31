@@ -236,44 +236,58 @@ def _write_rou_xml(path: Path, cars: int, ped: int, bike: int, moto: int):
     lines.append('    </routeDistribution>')
     lines.append('')
 
+    W = config.FLOW_INJECT_WINDOW_S   # injection window shorthand
+
     # --- Car flows -----------------------------------------------------------
+    # Cars use a short fixed period; all 120 cars enter well within the window.
     if cars > 0:
-        lines.append('    <!-- Car flows -->')
+        lines.append('    <!-- Car flows (all injected within FLOW_INJECT_WINDOW_S) -->')
         for i, n in enumerate(car_per_flow, start=1):
+            period = W / max(n, 1)
             lines.append(
                 f'    <flow id="car_flow{i}" type="car" route="routedist1"'
-                f' begin="0" number="{n}" period="exp(0.5)" departPos="random"/>'
+                f' begin="0" number="{n}"'
+                f' period="exp({period:.3f})" departPos="random_free"/>'
             )
         lines.append('')
 
     # --- Bicycle flows -------------------------------------------------------
+    # Period is computed per-flow so all N bikes finish entering by end=W.
     if bike > 0:
-        lines.append('    <!-- Bicycle flows -->')
+        lines.append('    <!-- Bicycle flows (all injected within FLOW_INJECT_WINDOW_S) -->')
         for i, n in enumerate(bike_per_flow, start=1):
+            period = W / max(n, 1)
             lines.append(
                 f'    <flow id="bike_flow{i}" type="bicycle" route="routedist1"'
-                f' begin="0" number="{n}" period="exp(10)" departPos="random"/>'
+                f' begin="0" number="{n}"'
+                f' period="exp({period:.3f})" departPos="random_free"/>'
             )
         lines.append('')
 
     # --- Motorcycle / PTW flows ----------------------------------------------
     if moto > 0:
-        lines.append('    <!-- Motorcycle (PTW) flows -->')
+        lines.append('    <!-- Motorcycle (PTW) flows (all injected within FLOW_INJECT_WINDOW_S) -->')
         for i, n in enumerate(moto_per_flow, start=1):
+            period = W / max(n, 1)
             lines.append(
                 f'    <flow id="moto_flow{i}" type="ptw" route="routedist1"'
-                f' begin="0" number="{n}" period="exp(10)" departPos="random"/>'
+                f' begin="0" number="{n}"'
+                f' period="exp({period:.3f})" departPos="random_free"/>'
             )
         lines.append('')
 
     # --- Pedestrian personFlows ----------------------------------------------
+    # begin=PERSONFLOW_BEGIN_S (now 0) so peds enter alongside vehicles.
+    # Per-flow period ensures all pedestrians are in the network by end=W.
     if ped > 0:
-        lines.append('    <!-- Pedestrian personFlows -->')
+        lines.append('    <!-- Pedestrian personFlows (all injected within FLOW_INJECT_WINDOW_S) -->')
         all_routes = [r for _, routes, _ in _PED_GROUPS for r in routes]
         for i, (r_id, n_ped) in enumerate(zip(all_routes, ped_per_flow)):
+            period = W / max(n_ped, 1)
             lines.append(
                 f'    <personFlow id="pf_{i}" begin="{config.PERSONFLOW_BEGIN_S:.2f}"'
-                f' number="{n_ped}" period="exp(10)" departPos="random">'
+                f' number="{n_ped}"'
+                f' period="exp({period:.3f})" departPos="random">'
             )
             lines.append(f'        <walk route="{r_id}"/>')
             lines.append('    </personFlow>')

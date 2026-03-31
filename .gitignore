@@ -24,3 +24,8 @@ scenarios/*
 # --- OS artefacts ----------------------------------------------------------
 .DS_Store
 Thumbs.db
+*.tex
+*.aux
+*.log
+*.out
+*.pdf
